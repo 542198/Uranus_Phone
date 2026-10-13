@@ -82,9 +82,13 @@ import { pickSttSource, transcribe as sttTranscribe } from "./stt.js";
 import {
   callRecordLine,
   callUserMessage,
+  listenAmbience,
   noteTurn,
   runCallTurn,
+  seeFrame,
   synthesizeSay,
+  takeAmbience,
+  takeFrame,
   transcribe,
 } from "./callturn.js";
 import { fetchLinkImages, fetchLinkVideos, renderLinks } from "./linkmeta.js";
@@ -10220,6 +10224,8 @@ export async function beginCall(getConfig, { runner, role, spaceId, peer, link, 
     // 节点拿它去取角色头像（见 callapi.js 的 /facetime/avatar）
     roleId: role.id,
     bargeIn: role.call?.bargeIn !== false,
+    // 关了的话节点就不截画面了（省得截了送过来再在这边丢掉）
+    seeCamera: role.call?.seeCamera !== false,
     silenceNoticeMs: (role.call?.silenceNotice ?? 45) * 1000,
     // 接通后等多久再开口（语音通道要热一下，不然头几个字被吃掉）
     openingDelayMs: role.call?.openingDelayMs ?? 1500,
@@ -10259,9 +10265,20 @@ export async function handleCallTurn(getConfig, { audio, kind = "said", seconds 
 
   // 1. 对方说了什么
   let said = typed;
+  let tone = "";
   if (kind === "said") {
     if (!audio?.length) throw new Error("没收到音频");
-    said = await transcribe(config, role, audio);
+
+    /*
+     * 背景声音在后台听，不等 —— 结果下一轮才告诉角色（见 callturn.js:listenAmbience）。
+     * 放在转写**前面**起跑：下面「这段没人说话」那种会直接 return，而纯噪音
+     * 恰恰是最能听出背景的一段。listenAmbience 自己管节流（30 秒一次）。
+     */
+    if (role.call?.hearAmbience !== false) listenAmbience({ config, role, call, wav: audio });
+
+    const heard = await transcribe(config, role, audio, { tone: role.call?.hearTone !== false });
+    said = heard.text;
+    tone = heard.tone;
 
     /*
      * 转写出来是「无声」之类的 —— VAD 误触了（咳嗽、关门、键盘声）。
@@ -10288,7 +10305,20 @@ export async function handleCallTurn(getConfig, { audio, kind = "said", seconds 
 
   // 2. 拼成这一轮的用户消息（带上「已接通多久」那个前缀）
   const userName = resolveUser(config, role)?.name ?? "{{user}}";
-  const userMsg = callUserMessage({ kind, text: said, seconds, userName });
+  const userMsg = callUserMessage({
+    kind,
+    text: said,
+    seconds,
+    userName,
+    tone,
+    // 上一轮（或更早）在后台听出来的背景，有新的才有
+    ambience: takeAmbience(call),
+    /*
+     * 摄像头画面：对方开口时节点就截了一帧、识图已经在跑（见 handleCallFrame），
+     * 多半这会儿已经看完了；没看完最多再等两秒，还不好就留给下一轮。
+     */
+    camera: role.call?.seeCamera !== false ? await takeFrame(call) : null,
+  });
 
   /*
    * ── 开场白：角色早就写好了，直接念，不打模型 ──
@@ -10352,6 +10382,24 @@ export async function handleCallTurn(getConfig, { audio, kind = "said", seconds 
     send,
     scope,
   });
+}
+
+/**
+ * 节点送来一帧摄像头画面（或者「摄像头关着」）。
+ *
+ * 不等识图：在后台描述好挂在这通电话上，handleCallTurn 拼用户消息时来拿。
+ * 角色栏关了「看摄像头」就直接丢掉 —— 连识图都不打。
+ *
+ * @param {Function} getConfig
+ * @param {{off?: boolean, jpeg?: string}} frame
+ */
+export function handleCallFrame(getConfig, frame) {
+  const call = getCall();
+  if (!call) return;
+  const config = getConfig();
+  const role = (config.roles ?? []).find((r) => r.id === call.roleId);
+  if (!role || role.call?.seeCamera === false) return;
+  void seeFrame({ config, role, call, frame });
 }
 
 /** 把攒好的那几句原样吐出去，让 speakAndRecord 那边不用分叉。 */

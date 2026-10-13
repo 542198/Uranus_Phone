@@ -15,6 +15,8 @@
  */
 
 import { clicheRules } from "./cliche.js";
+import { createHash } from "node:crypto";
+
 import { clampInt, clampNum, pickId, str } from "./normalize.js";
 
 /** 固定条目的种类，顺序 = 新建预设时的默认排列。 */
@@ -565,7 +567,7 @@ export const DEFAULT_FORMAT_CHILDREN = {
       "不写坐标的话卡片缩略图是一张对不上的通用地图。" +
       "编出来的小店、小区这种地图搜不到的地方更要写坐标。" +
       "坐标不用精确到门牌号，那一带的经纬度就行。",
-    "示例：「刚到{{sep}}[location:南宁万象城:22.8170,108.3665]{{sep}}你到哪了？」",
+    "示例：「刚到{{sep}}[location:上海外滩:31.2397,121.4998]{{sep}}你到哪了？」",
     "实在想不起某地的坐标时也可以只写地名：[location:地名]，" +
       "链接照样能点开搜到这个地方，只是缩略图不准。",
     "规则：位置卡片要单独占一条气泡，可以在它前后用 {{sep}} 接一句自己的话；" +
@@ -1119,8 +1121,10 @@ export const DEFAULT_ONLINE_HISTORY = [
  *
  * 语气标记那段**刻意没写死某一家的写法** —— 四家 TTS 认的标签不一样
  * （media.js:1691 的 elevenTagsOk 判这件事），写死会让另外三家把标签念出来。
+ *
+ * 现在的默认正文 = v1.20.2 那版 + 最后「摄像头」那一节（见 CALL_HOWTO_CAMERA）。
  */
-export const DEFAULT_CALL_HOWTO = [
+const CALL_HOWTO_V1202 = [
   "## 现在是在打电话",
   "",
   "你正在和 {{user}} 通 FaceTime。你说的每一句话都会被读成语音放给对方听 ——",
@@ -1158,6 +1162,25 @@ export const DEFAULT_CALL_HOWTO = [
   "  手头真有事要走。不用等对方同意，也不用问「那我挂了？」再等一轮。",
   "- 别为了挂而挂。聊得正好的时候硬收尾，比不挂更出戏。",
 ].join("\n");
+
+/**
+ * 「摄像头」那一节。用户定的：**没识别到画面时别编对方在干什么**，当语音通话。
+ *
+ * 画面是节点从对方的视频里截一帧、用角色的识图模型描述成一句话，以
+ * `[{{user}}的摄像头画面：……]` 贴进那一轮（callturn.js:seeFrame）。没开摄像头、
+ * 角色栏关了「看摄像头」、没配识图模型时，那一轮就没有这个标记 —— 模型最容易
+ * 在这时候顺着「视频通话」四个字编一段「看你在笑呢」，所以要明说。
+ */
+const CALL_HOWTO_CAMERA = [
+  "",
+  "### 摄像头",
+  "",
+  "{{user}} 开着摄像头时，消息里会有「[{{user}}的摄像头画面：……]」—— 那是你此刻在屏幕上",
+  "看到的，可以自然地提起，不用每句都说。",
+  "如果没有识别到 {{user}} 的摄像头画面，不要瞎编 {{user}} 在干什么，直接当作语音通话即可。",
+].join("\n");
+
+export const DEFAULT_CALL_HOWTO = `${CALL_HOWTO_V1202}\n${CALL_HOWTO_CAMERA}`;
 
 /**
  * v1.20.1 那版「怎么打电话」的默认正文（还带着「那些功能照样能用」那一节）。
@@ -1467,6 +1490,21 @@ function migrateSpyChildren(list, byKind) {
   }
 }
 
+/**
+ * 老版本的默认正文，只存 SHA-256。
+ *
+ * 和上面 legacyContent 一个用途（存着这段 = 没改过，换成新的），区别是原文
+ * **不能留在源码里**：「分享位置」以前的示例用的是作者本人所在城市的真实地名和
+ * 坐标，属于隐私。只存哈希照样认得出「没改过」，又不会把那句话再带进仓库。
+ */
+const LEGACY_CHILD_HASHES = {
+  location: ["daf280bc2165192d060daf6ffd6d2dceaf5db3c7a7289fa23f3ed7afa8985b1f"],
+};
+
+function sha256(text) {
+  return createHash("sha256").update(String(text)).digest("hex");
+}
+
 function normalizeFormatChildren(list) {
   const byKind = new Map();
   for (const raw of Array.isArray(list) ? list : []) {
@@ -1492,6 +1530,10 @@ function normalizeFormatChildren(list) {
       typeof raw?.content === "string" ? raw.content : DEFAULT_FORMAT_CHILDREN[kind];
     // 存着接链路之前那句默认正文 = 没改过，换成新格式
     if (content === legacyContent[kind]) content = DEFAULT_FORMAT_CHILDREN[kind];
+    // 只存了哈希的老默认正文（原文里有不该留在源码里的东西，见 LEGACY_CHILD_HASHES）
+    if (typeof content === "string" && LEGACY_CHILD_HASHES[kind]?.includes(sha256(content))) {
+      content = DEFAULT_FORMAT_CHILDREN[kind];
+    }
     return {
       id: `f-${kind}`,
       kind,
@@ -1603,9 +1645,12 @@ function normalizeEntries(list, mode = "online") {
       // 同上：只补「缺字段」的，用户改过的照原样留着。
       // 漏了这一支的后果很隐蔽 —— 条目还在、开关也开着，但正文是空的，
       // 于是整段「电话里怎么说话」压根没进提示词，角色照着发短信的路子念括号
-      // 存着上一版的默认正文（还带「那些功能照样能用」那一节）= 没改过，换成新的
+      // 存着以前哪一版的默认正文 = 没改过，换成新的（v1.20.1 还带「那些功能照样能用」，
+      // v1.20.2 还没有「摄像头」那一节）
       entry.content =
-        raw?.content === undefined || raw.content === LEGACY_CALL_HOWTO
+        raw?.content === undefined ||
+        raw.content === LEGACY_CALL_HOWTO ||
+        raw.content === CALL_HOWTO_V1202
           ? DEFAULT_CALL_HOWTO
           : str(raw.content);
     } else if (kind === "custom") {

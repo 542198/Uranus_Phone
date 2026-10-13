@@ -1843,7 +1843,7 @@ function normalizeCardSend(input) {
 /**
  * 分享位置：只有开关。
  *
- * 模型写 `[location:南宁万象城]`，服务端拼一条 maps.apple.com 的网址、照卡片
+ * 模型写 `[location:上海外滩]`，服务端拼一条 maps.apple.com 的网址、照卡片
  * 那条路发出去（见 card.js:mapsUrlFor 和 imessage.js:sendLocationPart）。
  * iMessage 没有「原生位置气泡」那种 content 类型，能做到的就是一张点开跳地图
  * 的链接卡片。
@@ -2208,8 +2208,23 @@ function normalizeSttApi(input) {
  */
 function normalizeCallNode(input) {
   const dir = input?.direction === "uranus" ? "uranus" : "node";
+  /*
+   * 节点在不在本机。只是界面上那个「节点在哪」的选择，连接逻辑不看它 ——
+   * 真正起作用的是 direction 和 trustLocal（界面选「在本机」时一并设成
+   * node + true，「不在本机」设 trustLocal = false）。
+   *
+   * 老配置没有这个字段：Uranus 去连节点、或者关了本机免配对的算不在本机，
+   * 其余算在本机。和 role.jsx:callNodeIsLocal 同一个判据。
+   */
+  const where =
+    input?.where === "local" || input?.where === "remote"
+      ? input.where
+      : dir === "uranus" || input?.trustLocal === false
+        ? "remote"
+        : "local";
   return {
     enabled: Boolean(input?.enabled),
+    where,
     direction: dir,
     // 去掉末尾的斜杠，拼路径时就不用判了
     url: str(input?.url).trim().replace(/\/+$/, ""),
@@ -2307,6 +2322,36 @@ function normalizeRoleCall(input) {
      * 静音检测严得多（要连着响满 500ms），并且这个开关留给用户关掉。
      */
     bargeIn: input?.bargeIn !== false,
+
+    /*
+     * 听语气。默认**开**。
+     *
+     * 用 Qwen3-ASR 转写的话，它每次都顺带回一个情绪标签（开心 / 难过 / 生气 /
+     * 惊讶 / 害怕 / 嫌弃），**不多花钱、不多花时间**；平静的不报。走多模态转写的
+     * 话，提示词里多一句「语气明显才另起一行写」。别家专门的转写不给情绪，那就没有。
+     * 给角色看的是 `[{{user}}的语气：开心]`，见 callturn.js:callUserMessage。
+     */
+    hearTone: input?.hearTone !== false,
+
+    /*
+     * 听背景声音（在街上、车里、旁边有人说话……）。默认**开**。
+     *
+     * 用角色的「听音」模型在后台听，**30 秒最多一次**，**不等它** —— 结果晚一轮
+     * 才告诉角色，所以不拖慢回话。和上次差不多就不报，免得角色一直念叨
+     * 「你那边好吵」。没配「听音」模型就听不了（专门的转写服务只转字）。
+     * 见 callturn.js:listenAmbience。
+     */
+    hearAmbience: input?.hearAmbience !== false,
+
+    /*
+     * 看摄像头（角色看得到对方）。默认**开**。
+     *
+     * 对方一开口，节点从 FaceTime 的视频里截一帧，用角色的「识图」模型描述成一句话，
+     * 以 `[{{user}}的摄像头画面：……]` 贴进这一轮；和上一张差不多就不报。识图和
+     * 「对方说话 + 转写」同时跑，一般不拖慢回话。没开摄像头、没配识图模型就当语音通话
+     * （默认通话预设「摄像头」那一节叫模型别编）。见 callturn.js:seeFrame。
+     */
+    seeCamera: input?.seeCamera !== false,
 
     /*
      * 对方多久没说话就提醒模型一次，秒。0 = 不提醒。
